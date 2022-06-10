@@ -1,4 +1,3 @@
-from __future__ import annotations
 from numpy import dtype
 from torchvision.io import read_image
 import torch
@@ -24,17 +23,17 @@ class ImageDataset(Dataset):
     def __getitem__(self, index):
         img_pth = os.path.join(self.img_dir,self.anotations.iloc[index,0])
         image = read_image(img_pth)
-        im_h, im_w = image.shape[1:]
+        _,im_h, im_w = image.shape
         # print(im_h,im_w)
         label = torch.tensor(self.labels[index].astype('int'))
         bbox = torch.tensor(self.bboxs[index].astype('int'))
 
         if self.transform:
             image = self.transform(image)
-            # print(image.shape)
-            scale_h, scale_w = image.shape[1]/im_h, image.shape[2]/im_w
-            bbox[:,0::2] = bbox[:,0::2]*scale_h
-            bbox[:,1::2] = bbox[:,1::2]*scale_w
+            _, new_h, new_w = image.shape
+            scale_h, scale_w = new_h/im_h, new_w/im_w
+            bbox[0::2] = bbox[0::2]*scale_h
+            bbox[1::2] = bbox[1::2]*scale_w
             bbox = bbox.int()
         
         return image, label, bbox
