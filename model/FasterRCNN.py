@@ -6,7 +6,7 @@ class FasterRCNN(nn.Module):
         self.extractor = feat_ext
         self.rpn = rpn
 
-    def forward(self,x,gt_bboxes=None):            # [N,3,H,W]
+    def forward(self,x,gt_bboxes=None, obj_label=None):            # [N,3,H,W]
         x = self.extractor(x)       # [N,512,H//16, W//16]
-        x,y= self.rpn(x, gt_bboxes)            
-        return x,y
+        outputs = self.rpn(x, gt_bboxes, obj_label)            
+        return outputs
