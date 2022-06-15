@@ -1,32 +1,36 @@
 import torch 
 import numpy as np
 
-def nms(dets, scores,thresh):
-    x1 = dets[:, 0]
-    y1 = dets[:, 1]
-    x2 = dets[:, 2]
-    y2 = dets[:, 3]
-    
-    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
-    order = scores.argsort()[::-1]
-
+def nms(bbox: torch.Tensor, scores:torch.Tensor, threshold:float):
+    '''
+    Parameter
+    ---
+    :param:`bbox` ~torch.Tensor [N,4]
+        2-D tensor of box predictions
+    :param:`scores` ~torch.Tensor [N,1]
+        1-D tensor of objectness scores
+    :param:`threshold`  ~float
+        overlap threshold iou
+    '''
+    order = scores.ravel().argsort(descending=True)
     keep = []
-    while order.size > 0:
-        i = order[0]
-        keep.append(i)
-        xx1 = np.maximum(x1[i], x1[order[1:]])
-        yy1 = np.maximum(y1[i], y1[order[1:]])
-        xx2 = np.minimum(x2[i], x2[order[1:]])
-        yy2 = np.minimum(y2[i], y2[order[1:]])
 
-        w = np.maximum(0.0, xx2 - xx1 + 1)
-        h = np.maximum(0.0, yy2 - yy1 + 1)
-        inter = w * h
-        ovr = inter / (areas[i] + areas[order[1:]] - inter)
+    while len(order)>0:
+    # 1.    select prediction S with highest confidence score add it to KEEP and remove from bbox
+        current_highest_score = order[0]
+        keep.append(current_highest_score)
+        order = order[1:]
 
-        inds = np.where(ovr <= thresh)[0]
-        order = order[inds + 1]
+        # sanity check
+        if len(order)==0:
+            break
 
+    # 2.a   compare prediction S with all predictions present in bbox by comparing the iou
+        ious = iou(bbox[current_highest_score], bbox[order])     
+    # 2.b   if iou > threshold for any prediction b in bbox, remove b from bbox
+        mask = ious < threshold
+        order = order[mask]
+    # 3.    repeat until no predictions left in bbox 
     return keep
 
 def boxToLocation(ground_truth, anchors):
@@ -82,9 +86,6 @@ def locToBox(anchors: torch.Tensor, locs:torch.Tensor):
 
     return rpn_boxes
 
-
-
-
 def generateCenters(feat_stride, height, width):
     cntr_x = np.arange(feat_stride, (width+1)*feat_stride, feat_stride) - width/2
     cntr_y = np.arange(feat_stride, (height+1)*feat_stride, feat_stride) - height/2
@@ -112,22 +113,63 @@ def generateAnchors(ratios, anchor_scales,feat_stride, height, width):
                 
                 idx +=1
 
-    return anchors.astype(np.int32)
+    # return anchors.astype(np.int32)
+    return anchors
 
-def clip(box, thres):
-    pass
 
 def split(batch, keep):
     counts = torch.unique(keep[0],return_counts=True)[1]
+    counts = torch.Tensor.cpu(counts)
     splits = tuple(counts.numpy())
-
     try:
         batch = batch[keep[0],keep[1],...]
     except:
         batch = batch[keep[0],keep[1]]
-        
+
     batch = torch.split(batch, split_size_or_sections=splits)
     return batch
 
+def iou(groundtruth, anchor):
+    y1,x1,y2,x2 = anchor[...,0],anchor[...,1],anchor[...,2],anchor[...,3]
+    gy1,gx1,gy2,gx2 = groundtruth[...,0],groundtruth[...,1],groundtruth[...,2],groundtruth[...,3]
+
+    xA = torch.max(x1,gx1)
+    yA = torch.max(y1,gy1)
+    xB = torch.min(x2,gx2)
+    yB = torch.min(y2,gy2)
+
+    ia = torch.clip(xB-xA,0) * torch.clip(yB-yA,0)
+
+    boxAarea =  (x2-x1)*(y2-y1)
+    boxBarea = (gx2-gx1)*(gy2-gy1)
+    iou = ia/(boxAarea+boxBarea-ia)
+    return iou
+
+
+def sampling(labels: torch.Tensor, n_sample: int, pos_ratio: float=0.5):
+    '''
+    Randomly samples from labels with given number of sample and ratio of postive/negative
+    '''
+
+    n_pos = int(n_sample*pos_ratio)
+    pos_idx = (torch.where(labels==1)[0]).float()
+    # print(pos_idx)
+    print(len(pos_idx))
+    if len(pos_idx) > n_pos:
+        discard = pos_idx[pos_idx.multinomial(len(pos_idx)-n_pos, replacement=False)].long()
+        labels[discard] = -1
+
+    pos_idx = torch.where(labels==1)[0]
+    n_neg = n_sample - len(pos_idx)
+    neg_idx = (torch.where(labels==0)[0]).float()
+
+    if len(neg_idx) > n_neg:
+        discard = neg_idx[neg_idx.multinomial(len(neg_idx)-n_neg, replacement=False)].long()
+        labels[discard] = -1
+
+    print(len(pos_idx),n_neg)
+    # print(len(torch.where(labels==1)[0]))
+    return labels
+  
 
 
