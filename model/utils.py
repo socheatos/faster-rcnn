@@ -1,6 +1,7 @@
 import torch 
 import numpy as np
 
+#  [ ] change np to torch 
 def nms(bbox: torch.Tensor, scores:torch.Tensor, threshold:float):
     '''
     Parameter
@@ -49,16 +50,20 @@ def boxToLocation(ground_truth, anchors):
 
     # finding parameterized coordinates of gt associated with the anchors
     # prevents exp overflow
-    eps = np.finfo(h_a.dtype).eps
-    h_a = np.maximum(h_a, eps)
-    w_a = np.maximum(w_a, eps)
+    eps = 1e-10
+    h_a += eps
+    w_a += eps
 
     t_y = (y-y_a)/h_a
     t_x = (x-x_a)/w_a 
-    t_w = np.log(w/w_a)
-    t_h = np.log(h/h_a)
+    t_w = torch.log(w/w_a)
+    t_h = torch.log(h/h_a)
+    
+    print(t_y.shape)
+    t = torch.stack((t_y,t_x,t_h, t_w), dim=2)
 
-    return t_y,t_x,t_w,t_h
+    # return t_y,t_x,t_w,t_h
+    return t
 
 def locToBox(anchors: torch.Tensor, locs:torch.Tensor):
     # convert anchors to x,y,h,w format
@@ -113,7 +118,6 @@ def generateAnchors(ratios, anchor_scales,feat_stride, height, width):
                 
                 idx +=1
 
-    # return anchors.astype(np.int32)
     return anchors
 
 
@@ -153,8 +157,7 @@ def sampling(labels: torch.Tensor, n_sample: int, pos_ratio: float=0.5):
 
     n_pos = int(n_sample*pos_ratio)
     pos_idx = (torch.where(labels==1)[0]).float()
-    # print(pos_idx)
-    print(len(pos_idx))
+
     if len(pos_idx) > n_pos:
         discard = pos_idx[pos_idx.multinomial(len(pos_idx)-n_pos, replacement=False)].long()
         labels[discard] = -1
@@ -166,9 +169,7 @@ def sampling(labels: torch.Tensor, n_sample: int, pos_ratio: float=0.5):
     if len(neg_idx) > n_neg:
         discard = neg_idx[neg_idx.multinomial(len(neg_idx)-n_neg, replacement=False)].long()
         labels[discard] = -1
-
-    print(len(pos_idx),n_neg)
-    # print(len(torch.where(labels==1)[0]))
+    
     return labels
   
 
