@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 import os
 
+# [ ]: add padding to support image with multiple bbox and labels
+
 class ImageDataset(Dataset):
     def __init__(self, img_dir, annotations, transform=None, target_transorm=None):
         self.img_dir = img_dir
@@ -26,7 +28,7 @@ class ImageDataset(Dataset):
         _,im_h, im_w = image.shape
         # print(im_h,im_w)
         label = torch.tensor(self.labels[index].astype('int'))
-        bbox = torch.tensor(self.bboxs[index].astype('int'))
+        bbox = torch.tensor(self.bboxs[index].astype('float'))
 
         if self.transform:
             image = self.transform(image)
@@ -34,7 +36,7 @@ class ImageDataset(Dataset):
             scale_h, scale_w = new_h/im_h, new_w/im_w
             bbox[0::2] = bbox[0::2]*scale_h
             bbox[1::2] = bbox[1::2]*scale_w
-            bbox = bbox.int()
+            
         
         return image, label, bbox
         
