@@ -1,16 +1,18 @@
-import numpy as np
 from torch.nn import functional as F
 import torch
 from torch import nn
-from . import utils
+from . import utils, losses
 from config import Config
-from torchvision.ops import boxes
+
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-# TODO: update self.CONFIG.batch_size manually for each input :( DONE
-# TODO: some reason sampling returns 0 and -1s only not 1s DONE 
 
+# [x]: update self.CONFIG.batch_size manually for each input :( 
+# [x]: some reason sampling returns 0 and -1s only not 1s DONE 
+# [ ]: get rid of for loop for batch calculations
+# [x]: find all anchors with same iou as the highest iou
+# [ ]: add padding to support varying size of generated proposal 
 
 class RegionProposalNetwork(nn.Module):
     '''
@@ -76,7 +78,7 @@ class RegionProposalNetwork(nn.Module):
         '''
         self.batch_size, _,height,width = feat_map.shape
 
-        feat_map = F.relu(self.conv1(feat_map))   # [N,out_channels,H,W]     
+        feat_map = F.relu(self.conv1(feat_map), inplace=True)   # [N,out_channels,H,W]     
 
         box_reg = self.reg(feat_map)       # anchor location predictions    [N,A*4,H,W]
         box_reg = box_reg.permute(0,2,3,1).contiguous().view(self.batch_size, -1, 4)   # reshape to same shape as anchor [N,W*H*A,4]       
@@ -88,24 +90,25 @@ class RegionProposalNetwork(nn.Module):
 
         obj_score = obj_score.permute(0,2,3,1).contiguous().view(self.batch_size, -1,2) #[N,H,W,A*2] -> [N, W*H*A, 2]
 
-    
-        # ------------ proposal generation -------------------
-        rpn_scores, rpn_rois, rpn_labels = self.generateProposals(box_reg, obj_fg_score, self.anchors_numpy, gt_boxes)
-        print(f'rpn_rois {rpn_rois.shape}')
-        # sampling
-
-        #  ------------ target generation --------------------------
-        # find iou between ground truth bbox and generateod rois 
+        rpn_scores, rpn_rois, rpn_labels, rpn_indices = self.generateProposals(box_reg, obj_fg_score, self.anchors_numpy, gt_boxes)
         target_anchor, target_labels = self.generateTargets(self.anchors_numpy,gt_boxes)
-        print('rpn label sample',rpn_labels[:,:3],rpn_labels[:,-3:])
-    
+
+
+        cls_loss = losses.loss_cls(obj_score.view(-1,2), target_labels.view(-1).long())
+        
+        # [] box regression loss <- parameterized predicted locations
+        gt_box_parameterized = utils.boxToLocation(gt_boxes.unsqueeze(1), target_anchor)
+        print(box_reg.shape, gt_box_parameterized.shape)
+        reg_loss = losses.loss_reg(box_reg, gt_box_parameterized, target_labels)
+
+        print(f'cls loss {cls_loss}, reg_loss {reg_loss}')
         return box_reg, obj_score,rpn_rois, rpn_scores, rpn_labels, target_anchor, target_labels
 
 # ------------------------------------------------------------------------------------
     def generateProposals(self,box_reg, obj_fg_score, anchors, gt_boxes):
         '''
         '''
-        anchors = torch.from_numpy(anchors).to(device=device)
+        anchors = torch.from_numpy(anchors).type_as(gt_boxes)
         anchors = anchors.view(1, anchors.size(0), 4).expand(self.batch_size, anchors.size(0), 4)
 
         roi_box = utils.locToBox(anchors,box_reg)
@@ -125,9 +128,7 @@ class RegionProposalNetwork(nn.Module):
 
         print(f'rpn_box size AFTER: {[i.shape for i in roi_splitted]}')
         print(f'obj_sco size AFTER: {[i.shape for i in score_splitted]}')
-        # print(score_splitted[0][:5])
-        # stack after we give the sorting + nms 
-        # print(score_splitted[1][-2:])
+
         rpn_roi = list()
         rpn_scores = list()
         roi_indices = list()
@@ -146,73 +147,75 @@ class RegionProposalNetwork(nn.Module):
             keep = utils.nms(roi, sco,self.CONFIG.nms_threshold)[:self.CONFIG.pos_nms] 
             
             sco = sco[keep]
-            roi = roi[keep]
-            print(len(keep),sco.shape,roi.shape)       
+            roi = roi[keep]       
             rpn_roi.append(roi)
             rpn_scores.append(sco)
-            # roi_indices.append(b*torch.ones((len(roi),)).int())
+            roi_indices.append(b*torch.ones((len(roi),)).int())
 
         rpn_scores = torch.stack(rpn_scores)
         rpn_roi = torch.stack(rpn_roi)
-        # roi_indices = torch.stack(roi_indices)
+        roi_indices = torch.stack(roi_indices)
 
         gt_boxes = gt_boxes.unsqueeze(1)
         ious = utils.iou(gt_boxes, rpn_roi)
-        max_ious, argmax_ious = torch.max(ious, dim = 1)
-        print(f'max_ious: {max_ious} argmax: {argmax_ious}')
+        max_ious, self.proposal_argmax_ious = torch.max(ious, dim = 1)
+        all_max_ious = torch.where(ious==max_ious.unsqueeze(-1))
+        print(f'max_ious: {max_ious} argmax: {self.proposal_argmax_ious}')
+        print(f'where the iou is the same {torch.unique(all_max_ious[0], return_counts =True)[1]}')
         label = torch.empty_like(rpn_scores)
         label.fill_(-1)
 
+        
         label[ious>=self.CONFIG.proposal_pos_iou_thres] = 1
-        label[ious<(1-self.CONFIG.anchor_pos_iou_thres)] = 0 
+        label[ious<(1-self.CONFIG.proposal_pos_iou_thres)] = 0
+        label[all_max_ious] = 1
 
         for b in range(self.batch_size):
             # print('before changing',label[b,:2])
             label[b] = utils.sampling(label[b],self.CONFIG.proposal_n_sample)
             print(len(torch.where(label[b]==1)[0]))
             
-        return rpn_scores, rpn_roi, label
+        return rpn_scores, rpn_roi, label, roi_indices
 
     def generateTargets(self, anchors, gt_boxes):
         print('generating targets...')
 
         anchors = torch.from_numpy(anchors).type_as(gt_boxes)
-        print(f'num_anchors BEFORE {anchors.shape}')
+        anchors = anchors.view(1, anchors.size(0), 4).expand(self.batch_size, anchors.size(0), 4)
+        print(f'num_anchors total {anchors.shape}')
         # keep only anchors that are within the image
         index_inside = torch.where(
-                                    (anchors[:, 0] >= 0) &
-                                    (anchors[:, 1] >= 0) &
-                                    (anchors[:, 2] <= self.CONFIG.input_h) &
-                                    (anchors[:, 3] <= self.CONFIG.input_h))
+                                    (anchors[..., 0] >= 0) &
+                                    (anchors[..., 1] >= 0) &
+                                    (anchors[..., 2] <= self.CONFIG.input_h) &
+                                    (anchors[..., 3] <= self.CONFIG.input_h))
+        
 
-        print(index_inside)
-        anchors = anchors[index_inside]
-        print(f'num_anchors AFTER {anchors.shape}')
-        anchors = anchors.view(1, anchors.size(0), 4).expand(self.batch_size, anchors.size(0), 4)
-        # print(f'anchor sample: {anchors[:,:2,:]}')
-
-        label = torch.empty((self.batch_size,len(index_inside[0])))
+        val_anchors = anchors[index_inside]
+        val_anchors = val_anchors.view(3,-1,4)
+        
+        label = torch.empty((self.batch_size, anchors.size(1)))
         label.fill_(-1)
-        print(f'label shape {label.shape}')
-        # print(f'FILL {label[:,:5]}')
 
         # labels wrt to gt
         gt_boxes = gt_boxes.unsqueeze(1)
-        ious = utils.iou(gt_boxes, anchors)
+        ious = utils.iou(gt_boxes, val_anchors)
+        ious_all_anchor = torch.zeros_like(label)
+        ious_all_anchor[index_inside] = torch.flatten(ious).type_as(ious_all_anchor)
 
-        # argmax_ious = ious.argmax(dim=1)
-        # max_ious_per_batch = ious[torch.arange(ious.size(0)), argmax_ious]
-        max_ious, argmax_ious = torch.max(ious, dim=1)
-        print(f'best iou per batch: {max_ious} index {argmax_ious}')
-
-        label[ious>=self.CONFIG.anchor_pos_iou_thres] = 1
-        label[ious<(1-self.CONFIG.anchor_pos_iou_thres)] = 0 
+        max_ious, self.target_argmax_ious = torch.max(ious_all_anchor, dim=1)
+        all_max_ious = torch.where(ious_all_anchor==max_ious.unsqueeze(-1).float())
+        print(f'best iou per batch: {max_ious} index {self.target_argmax_ious}')
+        print(f'where the iou is the same {torch.unique(all_max_ious[0], return_counts =True)[1]}')
+        
+        # [x] can just get rid of val_label and manipulate label directly
+        label[ious_all_anchor>=self.CONFIG.anchor_pos_iou_thres] = 1
+        label[ious_all_anchor<(1-self.CONFIG.anchor_pos_iou_thres)] = 0 
+        label[all_max_ious] = 1
 
         for b in range(self.batch_size):
-            # print('before changing',label[b,:2])
             label[b] = utils.sampling(label[b],self.CONFIG.anchor_n_sample)
-            print(len(torch.where(label[b]==1)[0]))
-            # print('after changing',label[b,:2])
+            print('num of ones', len(torch.where(label[b]==1)[0]))
 
         return anchors, label
     
