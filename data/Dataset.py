@@ -7,7 +7,6 @@ import pandas as pd
 import numpy as np
 import os
 
-# [ ]: add padding to support image with multiple bbox and labels
 
 class ImageDataset(Dataset):
     def __init__(self, img_dir, annotations, transform=None, target_transorm=None):
@@ -34,8 +33,8 @@ class ImageDataset(Dataset):
             image = self.transform(image)
             _, new_h, new_w = image.shape
             scale_h, scale_w = new_h/im_h, new_w/im_w
-            bbox[0::2] = bbox[0::2]*scale_h
-            bbox[1::2] = bbox[1::2]*scale_w
+            bbox[...,0::2] = bbox[...,0::2]*scale_h
+            bbox[...,1::2] = bbox[...,1::2]*scale_w
             
         
         return image, label, bbox
