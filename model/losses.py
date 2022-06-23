@@ -11,17 +11,14 @@ def loss_reg(predicted, groundtruth, label, lam=10):
     :parameter:`predicted` parameterized locations of predicted RoI for the object 
     :parameter:`groundtruth` parameterized location of ground truth box
     '''
-
     diff = predicted-groundtruth
     diff_abs = torch.abs(diff)    
 
-    smooth_l1 = torch.where(diff_abs<1, 0.5*diff**2, diff-0.5)
+    smooth_l1 = torch.where(diff_abs<1, 0.5*diff**2, diff_abs-0.5)
     sum_smooth_l1 = torch.sum(smooth_l1, dim=2)
-    print(len(torch.where(sum_smooth_l1<0)[0]))
-    
+      
     zeros = torch.zeros_like(sum_smooth_l1)
-    l_reg = torch.sum(torch.where(label==1, sum_smooth_l1,zeros))
-    loss = l_reg.mean() * lam
+    loss = torch.mean(torch.where(label==1, sum_smooth_l1,zeros)) * lam
 
     return loss
 
