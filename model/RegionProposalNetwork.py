@@ -3,9 +3,10 @@ import torch
 from torch import nn
 from . import utils, losses
 from config import Config
+from torch.nn.utils.rnn import pad_sequence
 
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+# device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 
 # [x]: update self.CONFIG.batch_size manually for each input :( 
@@ -13,11 +14,13 @@ device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 # [ ]: get rid of for loop for batch calculations
 # [x]: find all anchors with same iou as the highest iou
 # [ ]: add padding to support varying size of generated proposal 
+# [ ]: create separate modules for anchor and target generation
 
 class RegionProposalNetwork(nn.Module):
     '''
-    A Region Proposal Network (RPN) takes image (of any size) as input and outputs a
-    set of rectangular object proposals (RPN locs) and objectness score (foreground or background).
+    A Region Proposal Network (RPN) takes feature maps as input and outputs a set of rectangular object proposals (RPN locs) 
+    and objectness score (foreground or background).
+
 
     Parameters:
     ----
@@ -90,23 +93,22 @@ class RegionProposalNetwork(nn.Module):
 
         obj_score = obj_score.permute(0,2,3,1).contiguous().view(self.batch_size, -1,2) #[N,H,W,A*2] -> [N, W*H*A, 2]
 
-        rpn_scores, rpn_rois, rpn_labels, rpn_indices = self.generateProposals(box_reg, obj_fg_score, self.anchors_numpy, gt_boxes)
+        rpn_scores, rpn_rois, rpn_labels, rpn_indices = self.generateProposals(box_reg, obj_fg_score, self.anchors_numpy, gt_boxes, obj_label)
         target_anchor, target_labels = self.generateTargets(self.anchors_numpy,gt_boxes)
 
 
         cls_loss = losses.loss_cls(obj_score.view(-1,2), target_labels.view(-1).long())
+        reg_loss = losses.loss_reg(box_reg, target_anchor, target_labels)
         
-        # [] box regression loss <- parameterized predicted locations
-        gt_box_parameterized = utils.boxToLocation(gt_boxes.unsqueeze(1), target_anchor)
-        print(box_reg.shape, gt_box_parameterized.shape)
-        reg_loss = losses.loss_reg(box_reg, gt_box_parameterized, target_labels)
-
         print(f'cls loss {cls_loss}, reg_loss {reg_loss}')
         return box_reg, obj_score,rpn_rois, rpn_scores, rpn_labels, target_anchor, target_labels
 
 # ------------------------------------------------------------------------------------
-    def generateProposals(self,box_reg, obj_fg_score, anchors, gt_boxes):
+    def generateProposals(self,box_reg, obj_fg_score, anchors, gt_boxes, obj_label):
         '''
+        Parameters
+        ---
+
         '''
         anchors = torch.from_numpy(anchors).type_as(gt_boxes)
         anchors = anchors.view(1, anchors.size(0), 4).expand(self.batch_size, anchors.size(0), 4)
@@ -115,19 +117,22 @@ class RegionProposalNetwork(nn.Module):
         print(f'rpn_box size: {roi_box.shape}')
         
         # clip boxes so it stays within the image
-        roi_box[:,:,0::2] = torch.clip(roi_box[:,:,0::2],min=0, max=self.CONFIG.input_h)
-        roi_box[:,:,1::2] = torch.clip(roi_box[:,:,1::2],min=0, max=self.CONFIG.input_w)
+        roi_box[...,0::2] = torch.clip(roi_box[...,0::2],min=0, max=self.CONFIG.input_h)
+        roi_box[...,1::2] = torch.clip(roi_box[...,1::2],min=0, max=self.CONFIG.input_w)
 
         # keep only boxes with sides 16 or larger
-        roi_h = roi_box[:,:,2] - roi_box[:,:,0]
-        roi_w = roi_box[:,:,3] - roi_box[:,:,1]
-
+        roi_h = roi_box[...,2] - roi_box[...,0]
+        roi_w = roi_box[...,3] - roi_box[...,1]
         keep = torch.where((roi_h>=self.CONFIG.anchor_base) & (roi_w>=self.CONFIG.anchor_base))
+
         roi_splitted = utils.split(roi_box,keep)        # tuple of batch_size num of tensors
         score_splitted = utils.split(obj_fg_score, keep)   # tuple of tensors
 
-        print(f'rpn_box size AFTER: {[i.shape for i in roi_splitted]}')
-        print(f'obj_sco size AFTER: {[i.shape for i in score_splitted]}')
+        roi_splitted = pad_sequence(roi_splitted, batch_first=True)
+        score_splitted = pad_sequence(score_splitted, batch_first=True)
+
+        print(f'rpn_box size AFTER: {roi_splitted.shape} {[i.shape for i in roi_splitted]}')
+        print(f'obj_sco size AFTER: {score_splitted.shape} {[i.shape for i in score_splitted]}')
 
         rpn_roi = list()
         rpn_scores = list()
@@ -156,25 +161,24 @@ class RegionProposalNetwork(nn.Module):
         rpn_roi = torch.stack(rpn_roi)
         roi_indices = torch.stack(roi_indices)
 
-        gt_boxes = gt_boxes.unsqueeze(1)
-        ious = utils.iou(gt_boxes, rpn_roi)
-        max_ious, self.proposal_argmax_ious = torch.max(ious, dim = 1)
-        all_max_ious = torch.where(ious==max_ious.unsqueeze(-1))
-        print(f'max_ious: {max_ious} argmax: {self.proposal_argmax_ious}')
-        print(f'where the iou is the same {torch.unique(all_max_ious[0], return_counts =True)[1]}')
+        print(f'rpn_scores: {rpn_scores.shape} - {[i.shape for i in rpn_scores]}')
+        print(f'rpn_roi: {rpn_roi.shape} - {[i.shape for i in rpn_roi]}')
         label = torch.empty_like(rpn_scores)
         label.fill_(-1)
-
+        self.rpn_roi = rpn_roi
         
-        label[ious>=self.CONFIG.proposal_pos_iou_thres] = 1
-        label[ious<(1-self.CONFIG.proposal_pos_iou_thres)] = 0
-        label[all_max_ious] = 1
+        ious = utils.iou_batch(gt_boxes, rpn_roi)
+        self.ious = ious
+        print('sanity check max iou', ious.max())
 
+        label, _ = utils.assignLabels(label, ious, self.CONFIG.proposal_pos_iou_thres)
+        print('label==1:')
         for b in range(self.batch_size):
             # print('before changing',label[b,:2])
             label[b] = utils.sampling(label[b],self.CONFIG.proposal_n_sample)
             print(len(torch.where(label[b]==1)[0]))
-            
+
+        self.proposed_labels = label
         return rpn_scores, rpn_roi, label, roi_indices
 
     def generateTargets(self, anchors, gt_boxes):
@@ -191,31 +195,36 @@ class RegionProposalNetwork(nn.Module):
                                     (anchors[..., 3] <= self.CONFIG.input_h))
         
 
-        val_anchors = anchors[index_inside]
-        val_anchors = val_anchors.view(3,-1,4)
+        valid_anchors = anchors[index_inside]
+        valid_anchors = valid_anchors.view(self.batch_size,-1,4)
         
         label = torch.empty((self.batch_size, anchors.size(1)))
         label.fill_(-1)
 
         # labels wrt to gt
-        gt_boxes = gt_boxes.unsqueeze(1)
-        ious = utils.iou(gt_boxes, val_anchors)
-        ious_all_anchor = torch.zeros_like(label)
-        ious_all_anchor[index_inside] = torch.flatten(ious).type_as(ious_all_anchor)
-
-        max_ious, self.target_argmax_ious = torch.max(ious_all_anchor, dim=1)
-        all_max_ious = torch.where(ious_all_anchor==max_ious.unsqueeze(-1).float())
-        print(f'best iou per batch: {max_ious} index {self.target_argmax_ious}')
-        print(f'where the iou is the same {torch.unique(all_max_ious[0], return_counts =True)[1]}')
+        valid_ious = utils.iou_batch(gt_boxes, valid_anchors)
         
-        # [x] can just get rid of val_label and manipulate label directly
-        label[ious_all_anchor>=self.CONFIG.anchor_pos_iou_thres] = 1
-        label[ious_all_anchor<(1-self.CONFIG.anchor_pos_iou_thres)] = 0 
-        label[all_max_ious] = 1
+        print('sanity check max valid iou', valid_ious.max())
+        ious = torch.zeros(self.batch_size, anchors.size(1), valid_ious.size(-1)).type_as(valid_ious)
+        ious[index_inside] = valid_ious.reshape(-1, valid_ious.size(-1))
+        print('sanity check max ALL iou', ious.max())
+        self.target_ious = ious
+        
+        label, gt_idx = utils.assignLabels(label,ious, self.CONFIG.anchor_pos_iou_thres)
 
         for b in range(self.batch_size):
             label[b] = utils.sampling(label[b],self.CONFIG.anchor_n_sample)
             print('num of ones', len(torch.where(label[b]==1)[0]))
+
+        self.target_labels = label
+
+        gt_idx_anchors = gt_idx.repeat(4,1,1).permute(1,2,0).unsqueeze(-2)
+        gt_boxes = gt_boxes.unsqueeze(1).repeat(1,gt_idx.size(1),1,1)
+        gt_boxes = torch.gather(gt_boxes, -2, gt_idx_anchors).squeeze()
+
+        print(gt_boxes.shape, anchors.shape)
+        anchors = utils.boxToLocation(gt_boxes, anchors)
+        self.target_anchors = anchors
 
         return anchors, label
     
