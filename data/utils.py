@@ -6,10 +6,6 @@ import matplotlib.pyplot as plt
 import cv2 
 
 def collate_fn(batch):
-    return tuple(zip(*batch))
-
-
-def collate_fn_2(batch):
     images = list()
     labels = list()
     bboxs = list()

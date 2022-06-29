@@ -97,6 +97,50 @@ def locToBox(anchors: torch.Tensor, locs:torch.Tensor):
 
     return rpn_boxes
 
+def toXYHW(box):
+    '''Converts (Y1,X1,Y2,X2) bounding box to (X,Y,H,W) format where
+     (X,Y) are top left coordinates and (H,W) are the heigh and width of the box respectively
+
+    Parameters
+    ----------
+    box : torch.Tensor
+        [B,N,4] tensor 
+    
+    Returns
+    ---
+        [B,N,4] torch.Tensor
+    '''
+    Y1 = box[...,0]
+    X1 = box[...,1]
+    Y2 = box[...,2]
+    X2 = box[...,3]
+
+    H = Y2-Y1
+    W = X2-X1
+
+    XYHW = torch.stack((X1,Y1,H,W),dim=-1)
+    return XYHW
+
+def toXYXY(box):
+    '''Converts (Y1,X1,Y2,X2) bounding box to (X1,Y1,X2,Y2) format where
+
+    Parameters
+    ----------
+    box : torch.Tensor
+        [B,N,4] tensor 
+    
+    Returns
+    ---
+        [B,N,4] torch.Tensor
+    '''
+    Y1 = box[...,0]
+    X1 = box[...,1]
+    Y2 = box[...,2]
+    X2 = box[...,3]
+
+    XYXY = torch.stack((X1,Y1,X2,Y2),dim=-1)
+    return XYXY
+
 def generateCenters(feat_stride, height, width):
     cntr_x = np.arange(feat_stride, (width+1)*feat_stride, feat_stride) - width/2
     cntr_y = np.arange(feat_stride, (height+1)*feat_stride, feat_stride) - height/2
@@ -218,8 +262,8 @@ def assignLabels(label, ious, pos_iou_thres=0.5):
     label_max_ious[torch.where(label_max_ious==0)] = -1
     all_label_max_idx = torch.where(ious==label_max_ious.unsqueeze(1))
     
-    _, gt_idx =  torch.max(ious, dim=2)
-    gt_ious = torch.gather(ious,-1,gt_idx.unsqueeze(-1)).squeeze()
+    _, gt_idx =  torch.max(ious, dim=-1)
+    gt_ious = torch.gather(ious,-1,gt_idx.unsqueeze(-1)).squeeze(-1)
     gt_max_ious, _ = torch.max(gt_ious, dim=1)
     gt_max_idx = torch.where(gt_ious==gt_max_ious.unsqueeze(-1))
 
@@ -229,3 +273,25 @@ def assignLabels(label, ious, pos_iou_thres=0.5):
     label[gt_ious>=pos_iou_thres] = 1
 
     return label, gt_idx
+
+def generateBBox(gt_boxes, idx):
+    gt_idx_anchors = idx.repeat(4,1,1).permute(1,2,0).unsqueeze(-2)
+    gt_boxes = gt_boxes.unsqueeze(1).repeat(1,idx.size(1),1,1)
+    gt_boxes = torch.gather(gt_boxes, -2, gt_idx_anchors).squeeze()
+    return gt_boxes
+
+def generateClsLab(fg_label, obj_label,idx):
+
+    cls_label = torch.empty_like(fg_label)
+    cls_label.fill_(-1)
+
+    gt_idx_objlab = idx.unsqueeze(1)
+    obj_label = obj_label.repeat(1,1,idx.size(1)).squeeze()
+    selected = torch.gather(obj_label,1,gt_idx_objlab).squeeze().type_as(cls_label) #(BATCH x NUMANCHORS)
+
+    mask = fg_label.eq(1)
+
+    cls_label[mask] = selected[mask]
+    cls_label +=1
+
+    return cls_label

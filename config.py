@@ -3,11 +3,16 @@ class Config():
         self.input_h = 600
         self.input_w = 600
         self.batch_size = 2
-
+        self.num_classes = 3+1
+        
+        # 'sub-sampling ratio'
         self.feat_stride = 16 # (original img dimensions)/(feature map dimension) for VGG it's 16
+        self.H_roi_pool= 7
+        self.W_roi_pool = 7
+
         self.ratios = [0.5, 1, 2]
-        # self.anchor_scales = [8, 16, 32]
-        self.anchor_scales = [4, 8, 16]
+        self.anchor_scales = [8, 16, 32]
+        # self.anchor_scales = [4, 8, 16]
         self.anchor_base = 16 # 16
 
         self.nms_threshold = 0.7
@@ -30,3 +35,4 @@ class Config():
         
         self.proposal_pos_iou_thres = 0.7
         self.proposal_n_sample = 128
+

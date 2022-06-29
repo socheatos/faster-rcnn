@@ -32,8 +32,7 @@ class RegionProposalNetwork(nn.Module):
     '''
     def __init__(self, in_channels=512, mid_channels=512, config: Config=None):
         super().__init__()
-        if not config:
-            raise Exception('No config parameter found')
+
         self.CONFIG = config   
         self.n_anchors = len(self.CONFIG.anchor_scales) * len(self.CONFIG.ratios)
     
@@ -93,15 +92,15 @@ class RegionProposalNetwork(nn.Module):
 
         obj_score = obj_score.permute(0,2,3,1).contiguous().view(self.batch_size, -1,2) #[N,H,W,A*2] -> [N, W*H*A, 2]
 
-        rpn_scores, rpn_rois, rpn_labels, rpn_indices = self.generateProposals(box_reg, obj_fg_score, self.anchors_numpy, gt_boxes, obj_label)
-        target_anchor, target_labels = self.generateTargets(self.anchors_numpy,gt_boxes)
-
-
-        cls_loss = losses.loss_cls(obj_score.view(-1,2), target_labels.view(-1).long())
-        reg_loss = losses.loss_reg(box_reg, target_anchor, target_labels)
+        rpn_scores, rpn_rois, rpn_labels, rpn_cls_labels, rpn_indices = self.generateProposals(box_reg, obj_fg_score, self.anchors_numpy, gt_boxes, obj_label)
+        target_anchor, target_labels, target_cls_labels = self.generateTargets(self.anchors_numpy,gt_boxes, obj_label)
         
-        print(f'cls loss {cls_loss}, reg_loss {reg_loss}')
-        return box_reg, obj_score,rpn_rois, rpn_scores, rpn_labels, target_anchor, target_labels
+
+        self.cls_loss = losses.loss_cls(obj_score.view(-1,2), target_labels.view(-1).long())
+        self.reg_loss = losses.loss_reg(box_reg, target_anchor, target_labels)
+        print(f'rpn cls loss {self.cls_loss}, rpn reg_loss {self.reg_loss}')
+
+        return box_reg, obj_score,rpn_rois, rpn_scores, rpn_labels, rpn_cls_labels,rpn_indices, target_anchor, target_labels, target_cls_labels
 
 # ------------------------------------------------------------------------------------
     def generateProposals(self,box_reg, obj_fg_score, anchors, gt_boxes, obj_label):
@@ -136,8 +135,7 @@ class RegionProposalNetwork(nn.Module):
 
         rpn_roi = list()
         rpn_scores = list()
-        roi_indices = list()
-
+        
         for b in range(self.batch_size):
             roi = roi_splitted[b]
             sco = score_splitted[b]
@@ -155,33 +153,36 @@ class RegionProposalNetwork(nn.Module):
             roi = roi[keep]       
             rpn_roi.append(roi)
             rpn_scores.append(sco)
-            roi_indices.append(b*torch.ones((len(roi),)).int())
 
-        rpn_scores = torch.stack(rpn_scores)
-        rpn_roi = torch.stack(rpn_roi)
-        roi_indices = torch.stack(roi_indices)
+        rpn_scores = pad_sequence(rpn_scores, True)
+        rpn_roi = pad_sequence(rpn_roi, True)
+        roi_indices = torch.ones_like(rpn_scores)
+        for i in range(self.batch_size):
+            roi_indices[i] = roi_indices[i]*i
 
         print(f'rpn_scores: {rpn_scores.shape} - {[i.shape for i in rpn_scores]}')
         print(f'rpn_roi: {rpn_roi.shape} - {[i.shape for i in rpn_roi]}')
         label = torch.empty_like(rpn_scores)
         label.fill_(-1)
-        self.rpn_roi = rpn_roi
-        
+
         ious = utils.iou_batch(gt_boxes, rpn_roi)
-        self.ious = ious
         print('sanity check max iou', ious.max())
 
-        label, _ = utils.assignLabels(label, ious, self.CONFIG.proposal_pos_iou_thres)
+        label, gt_idx = utils.assignLabels(label, ious, self.CONFIG.proposal_pos_iou_thres)
+        self.rpn_gt_idx =gt_idx
+
         print('label==1:')
         for b in range(self.batch_size):
             # print('before changing',label[b,:2])
             label[b] = utils.sampling(label[b],self.CONFIG.proposal_n_sample)
             print(len(torch.where(label[b]==1)[0]))
 
-        self.proposed_labels = label
-        return rpn_scores, rpn_roi, label, roi_indices
+        self.rpn_gt_roi = utils.generateBBox(gt_boxes, gt_idx)
+        cls_label = utils.generateClsLab(label, obj_label, gt_idx)
 
-    def generateTargets(self, anchors, gt_boxes):
+        return rpn_scores, rpn_roi, label, cls_label, roi_indices
+
+    def generateTargets(self, anchors, gt_boxes, obj_label):
         print('generating targets...')
 
         anchors = torch.from_numpy(anchors).type_as(gt_boxes)
@@ -216,15 +217,14 @@ class RegionProposalNetwork(nn.Module):
             label[b] = utils.sampling(label[b],self.CONFIG.anchor_n_sample)
             print('num of ones', len(torch.where(label[b]==1)[0]))
 
-        self.target_labels = label
-
-        gt_idx_anchors = gt_idx.repeat(4,1,1).permute(1,2,0).unsqueeze(-2)
-        gt_boxes = gt_boxes.unsqueeze(1).repeat(1,gt_idx.size(1),1,1)
-        gt_boxes = torch.gather(gt_boxes, -2, gt_idx_anchors).squeeze()
+        gt_boxes = utils.generateBBox(gt_boxes, gt_idx)
+        cls_label = utils.generateClsLab(label, obj_label, gt_idx)
 
         print(gt_boxes.shape, anchors.shape)
+
+        self.anchors = anchors
         anchors = utils.boxToLocation(gt_boxes, anchors)
         self.target_anchors = anchors
 
-        return anchors, label
+        return anchors, label, cls_label
     
