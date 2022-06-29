@@ -37,3 +37,21 @@ def loss_cls(predicted, groundtruth, ignore_index=-1):
     '''
     loss = F.cross_entropy(predicted, groundtruth, ignore_index= ignore_index)
     return loss
+
+def rpn_loss_fn(predicted_locs, predicted_scores, gt_locs, gt_labels):
+    cls_loss = loss_cls(predicted_scores.view(-1,2), gt_labels.flatten().long())
+    reg_loss = loss_reg(predicted_locs, gt_locs, gt_labels)
+
+    return cls_loss, reg_loss
+
+def fastrcnn_loss_fn(loc, score, target_loc, target_cls):
+    target_cls = target_cls.flatten().long()
+    target_loc = target_loc.view(-1,4)
+
+    rpn_cls_idx = target_cls.flatten().long().unsqueeze(1).repeat(1,4).unsqueeze(1)
+    loc_cls = torch.gather(loc, 1, rpn_cls_idx).squeeze()
+    
+    cls_loss = loss_cls(score, target_cls)
+    reg_loss = loss_reg(loc_cls, target_loc, target_cls,1,False)
+
+    return cls_loss, reg_loss
