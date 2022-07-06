@@ -1,43 +1,51 @@
 import torch
 import torch.nn as nn
-from model import losses, utils
-from model.RegionProposalNetwork import RegionProposalNetwork 
-from model.FeatureExtractor import BaseArchitect, FeatureExtractor, Classifier
+from model.FeatureExtractor import FeatureExtractor, Classifier
+from . import losses
 from torchvision.ops import RoIPool
 
 class FasterRCNN(nn.Module):
-    def __init__(self, config =None):
-        super().__init__()
-        vgg = BaseArchitect(config=config)
+    def __init__(self, base_architecture, rpn,config =None, pretrained=False):
+        super(FasterRCNN, self).__init__()       
+
         self.CONFIG = config
-        self.extractor = FeatureExtractor(vgg.extractor)
+        self.training = config.training
 
-        self.rpn = RegionProposalNetwork(config=config)
+        self.feat_stride = config.feat_stride
+        self.num_classes = config.num_classes
 
-        self.pooling = RoIPool(output_size=(config.H_roi_pool, config.W_roi_pool), spatial_scale=(1/config.feat_stride)) 
-        self.clsifier = Classifier(vgg.classifier, config=config)
+        self.extractor = FeatureExtractor(base_architecture.extractor)
+        self.rpn = rpn
+
+        self.pooling = RoIPool(output_size=(config.H_roi_pool, config.W_roi_pool), spatial_scale=(1/self.feat_stride)) 
+        self.clsifier = Classifier(base_architecture.classifier, config=config)
 
     def forward(self,im,gt_bboxes=None, obj_label=None):            # [N,3,H,W]
         feature_map = self.extractor(im)       # [N,512,H//16, W//16]
+        proposals, rpn_loss = self.rpn(feature_map, gt_bboxes, obj_label)
 
-        box_reg, obj_score, \
-        rpn_rois, rpn_scores, rpn_labels, rpn_cls_label, rpn_indices, \
-        target_anchor, target_labels, target_cls_label = self.rpn(feature_map, gt_bboxes, obj_label)
+        rpn_boxes, rpn_scores, rpn_indices  = proposals['boxes'], proposals['scores'],proposals['indices']
 
-        # feature map and proposals go into roi pooling layer
+        # pooling
+        sampled_boxes = rpn_boxes.view(-1,4)
         idx = rpn_indices.view(-1,1)
-        sampled_rois = rpn_rois.view(-1,4)
 
-        pool_input = torch.cat([idx, sampled_rois], dim=-1)
-        pool_input[:,1:] =pool_input[:,1:].mul_(1/self.CONFIG.feat_stride)
+        pool_input = torch.cat([idx, sampled_boxes],dim=-1)
+        pool_input[:,1:] = pool_input[:,1:].mul_(1/self.feat_stride)
 
         pool_output = self.pooling(feature_map, pool_input)
         pool_output = pool_output.view(pool_output.size(0),-1)
 
-        # pass to the classifier
+        # classifier
         loc, score = self.clsifier(pool_output)
-        loc = loc.view(-1, self.CONFIG.num_classes,4)
-        
-        output = [box_reg, obj_score,rpn_rois, rpn_scores, rpn_labels, rpn_cls_label,rpn_indices, target_anchor, target_labels,target_cls_label,\
-                    pool_input, pool_output, loc, score]
+        loc = loc.view(-1, self.num_classes, 4)
+
+        rcnn_loss = {'reg_loss': 0, 'cls_loss':0}
+        if self.training:
+        # losses
+            cls_loss, reg_loss = losses.fastrcnn_loss_fn(loc, score, proposals['locs'], proposals['cls_labels'])
+            rcnn_loss['reg_loss'] = reg_loss
+            rcnn_loss['cls_loss'] = cls_loss 
+
+        output = [rpn_boxes, rpn_scores, rpn_loss,loc, score, rcnn_loss]
         return output

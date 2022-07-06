@@ -141,36 +141,6 @@ def toXYXY(box):
     XYXY = torch.stack((X1,Y1,X2,Y2),dim=-1)
     return XYXY
 
-def generateCenters(feat_stride, height, width):
-    cntr_x = np.arange(feat_stride, (width+1)*feat_stride, feat_stride) - width/2
-    cntr_y = np.arange(feat_stride, (height+1)*feat_stride, feat_stride) - height/2
-    centers = np.array(np.meshgrid(cntr_x,cntr_y)).T.reshape(-1,2)
-    return centers
-
-def generateAnchors(ratios, anchor_scales,feat_stride, height, width):
-    # for each center, generate len(ratios)*len(anchor_scales) there
-    # there are centers_row*centers_col*len(ratios)*len(anchor_scales) in total
-    # for each center, generate the anchor boxes 
-    centers = generateCenters(feat_stride, height, width)
-
-    anchors = np.zeros((len(centers)*len(anchor_scales)*len(ratios),4))
-    idx = 0 
-    for cntr_y, cntr_x in centers:
-        for i in range(len(ratios)):
-            for j in range(len(anchor_scales)):
-                h = feat_stride * anchor_scales[j] * np.sqrt(ratios[i])
-                w = feat_stride * anchor_scales[j] * np.sqrt(1/ratios[i])
-
-                anchors[idx, 0] = cntr_y - h /2
-                anchors[idx, 1] = cntr_x - w /2
-                anchors[idx, 2] = cntr_y + h /2
-                anchors[idx, 3] = cntr_x + w /2
-                
-                idx +=1
-
-    return anchors
-
-
 def split(batch, keep):
     counts = torch.unique(keep[0],return_counts=True)[1]
     counts = torch.Tensor.cpu(counts)

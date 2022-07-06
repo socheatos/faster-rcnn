@@ -1,5 +1,6 @@
 class Config():
     def __init__(self,TRAIN=False):
+        self.training = TRAIN
         self.input_h = 600
         self.input_w = 600
         self.batch_size = 2
