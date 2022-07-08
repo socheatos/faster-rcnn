@@ -5,7 +5,7 @@ from . import losses
 from torchvision.ops import RoIPool
 
 class FasterRCNN(nn.Module):
-    def __init__(self, base_architecture, rpn,config =None, pretrained=False):
+    def __init__(self, base_architecture, rpn,config =None):
         super(FasterRCNN, self).__init__()       
 
         self.CONFIG = config
@@ -43,9 +43,9 @@ class FasterRCNN(nn.Module):
         rcnn_loss = {'reg_loss': 0, 'cls_loss':0}
         if self.training:
         # losses
-            cls_loss, reg_loss = losses.fastrcnn_loss_fn(loc, score, proposals['locs'], proposals['cls_labels'])
+            cls_loss, reg_loss = losses.fastrcnn_loss_fn(loc, score, proposals['locs'].clone(), proposals['cls_labels'].clone())
             rcnn_loss['reg_loss'] = reg_loss
             rcnn_loss['cls_loss'] = cls_loss 
 
-        output = [rpn_boxes, rpn_scores, rpn_loss,loc, score, rcnn_loss]
+        output = [rpn_boxes, rpn_scores, rpn_loss, loc, score, rcnn_loss, proposals]
         return output

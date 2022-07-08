@@ -1,7 +1,6 @@
 import torch 
-import numpy as np
 
-# [ ] change np to torch 
+# [x] change np to torch 
 # [ ] documentation !
 def nms(bbox: torch.Tensor, scores:torch.Tensor, threshold:float):
     '''
@@ -89,7 +88,7 @@ def locToBox(anchors: torch.Tensor, locs:torch.Tensor):
     h = torch.exp(t_h) * h_a.unsqueeze(2)
     w = torch.exp(t_w) * w_a.unsqueeze(2)
 
-    rpn_boxes = locs.clone()
+    rpn_boxes = torch.empty_like(locs)
     rpn_boxes[...,0::4] = y - (0.5 * h)
     rpn_boxes[...,1::4] = x - (0.5 * w)
     rpn_boxes[...,2::4] = y + (0.5 * h)
@@ -171,9 +170,22 @@ def iou(groundtruth, anchor):
 
 def iou_batch(groundtruth,anchors):
     '''
-    Batch calculation o
-    
+    Calculate multiple ious of groundtruth and anchors at the same time. The generated anchors are computed against each groundtruth bounding box.
+
+    Parameters
+    ----------
+    groundtruth : [B, N, 4] torch.Tensor  
+    anchors : [B, M, 4] torch.Tensor 
+       
+    where   B = batch_size
+            N = number of ground truth bounding boxes (some observations are padded)
+            M = number of anchors 
+    Returns
+    -------
+    [B, M, N] torch.Tensor
+        
     '''
+    epsilon = 1e-6
     anchors_cut_area = (anchors[...,2]-anchors[...,0]) * (anchors[...,3]-anchors[...,1])
     gt_area = (groundtruth[...,2]-groundtruth[...,0]) * (groundtruth[...,3]-groundtruth[...,1])
 
@@ -181,7 +193,9 @@ def iou_batch(groundtruth,anchors):
     minn = torch.min(anchors.unsqueeze(2).permute(1,0,2,3)[...,2:], groundtruth[...,2:]).permute(1,2,0,3)
 
     intersect = torch.clip(minn[...,0]-maxx[...,0],0) * torch.clip(minn[...,1]-maxx[...,1],0)
-    iou = (intersect/((anchors_cut_area.unsqueeze(1)+ gt_area.unsqueeze(-1))-intersect)).permute(0,2,1)
+    union = (anchors_cut_area.unsqueeze(1)+ gt_area.unsqueeze(-1))-intersect
+    union = torch.clamp(union, min=epsilon)
+    iou = (intersect/union).permute(0,2,1)
     return iou
 
 def sampling(labels: torch.Tensor, n_sample: int, pos_ratio: float=0.5):
@@ -227,6 +241,10 @@ def assignLabels(label, ious, pos_iou_thres=0.5):
         [batch_size, num_obs, num_labels] 
     pos_ious_thres : float, optional
         label=1 if above the threshold and 0 if below 1-threshod, by default 0.5
+    
+    Returns
+    -------
+    [batch_size, num_obs] label:torch.Tensor
     '''
     label_max_ious, _ = torch.max(ious, dim=1)
     label_max_ious[torch.where(label_max_ious==0)] = -1
@@ -253,7 +271,7 @@ def generateBBox(gt_boxes, idx):
 def generateClsLab(fg_label, obj_label,idx):
 
     cls_label = torch.empty_like(fg_label)
-    cls_label.fill_(-1)
+    cls_label.fill_(0)
 
     gt_idx_objlab = idx.unsqueeze(1)
     obj_label = obj_label.repeat(1,1,idx.size(1)).squeeze()
@@ -262,6 +280,5 @@ def generateClsLab(fg_label, obj_label,idx):
     mask = fg_label.eq(1)
 
     cls_label[mask] = selected[mask]
-    cls_label +=1
 
     return cls_label

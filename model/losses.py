@@ -11,10 +11,12 @@ def loss_reg(predicted, groundtruth, label, lam=10, mean=True):
     :parameter:`predicted` parameterized locations of predicted RoI for the object 
     :parameter:`groundtruth` parameterized location of ground truth box
     '''
+    eps = 0.00001
     diff = predicted-groundtruth
-    diff_abs = torch.abs(diff)    
-
-    smooth_l1 = torch.where(diff_abs<1, 0.5*diff**2, diff_abs-0.5).sum(dim=-1)
+    diff_abs = torch.abs(diff)+eps    
+    
+    smooth_l1 = torch.zeros_like(diff_abs)
+    smooth_l1 = torch.where(diff_abs<1, 0.5*(diff_abs**2), diff_abs-0.5).sum(dim=-1)
     zeros = torch.zeros_like(smooth_l1)
 
     loss = torch.where(label>0, smooth_l1,zeros).sum() * lam
@@ -52,6 +54,6 @@ def fastrcnn_loss_fn(loc, score, target_loc, target_cls):
     loc_cls = torch.gather(loc, 1, rpn_cls_idx).squeeze()
     
     cls_loss = loss_cls(score, target_cls)
-    reg_loss = loss_reg(loc_cls, target_loc, target_cls,1,False)
+    reg_loss = loss_reg(loc_cls, target_loc, target_cls,1)
 
     return cls_loss, reg_loss

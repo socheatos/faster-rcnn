@@ -7,14 +7,13 @@ from torch.nn.utils.rnn import pad_sequence
 from math import sqrt
 
 
-# device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 
 # [x]: update self.CONFIG.batch_size manually for each input :( 
 # [x]: some reason sampling returns 0 and -1s only not 1s DONE 
 # [ ]: get rid of for loop for batch calculations
 # [x]: find all anchors with same iou as the highest iou
-# [ ]: add padding to support varying size of generated proposal 
+# [x]: add padding to support varying size of generated proposal 
 # [x]: create separate modules for anchor and target generation
 class AnchorGenerator():
     def __init__(self,config):
@@ -114,8 +113,8 @@ class ProposalGenerator(nn.Module):
         for b in range(batch_size):
             labels[b] = utils.sampling(labels[b],self.n_sample)
 
-        gt_roi = utils.generateBBox(gt_boxes, gt_idx)
-        gt_label = utils.generateClsLab(labels, obj_labels, gt_idx) # cls label
+        gt_roi = utils.generateBBox(gt_boxes, gt_idx).type_as(gt_boxes)
+        gt_label = utils.generateClsLab(labels, obj_labels, gt_idx).type_as(obj_labels) # cls label
 
         output = {'boxes': gt_roi, 'labels':gt_label}
         return output
@@ -196,20 +195,18 @@ class RegionProposalNetwork(nn.Module):
         channel size of immediate tensor output
 
     '''
-    def __init__(self, anchor_generator, proposal_generator, target_generator,in_channels=512, mid_channels=512, config: Config=None):
+    def __init__(self,in_channels=512, mid_channels=512, config: Config=None):
         super(RegionProposalNetwork, self).__init__()
 
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
-        self.CONFIG = config
         self.training = config.training
         self.anchor_scales = config.anchor_scales
         self.ratios = config.ratios   
         self.n_anchors = len(self.anchor_scales) * len(self.ratios)
+        
+        self.anchors = AnchorGenerator(config).generate()
+        self.proposal_generator = ProposalGenerator(config)
+        self.target_generator = TargetGenerator(config)
 
-        self.anchors = anchor_generator.generate().to(device)
-        self.proposal_generator = proposal_generator
-        self.target_generator = target_generator
         # intermediate layer extracting features from the feature map for proposal 
         # generation
         self.conv1 =  nn.Conv2d(in_channels=in_channels, out_channels=mid_channels,
@@ -226,9 +223,7 @@ class RegionProposalNetwork(nn.Module):
                                       kernel_size=1, stride=1, padding=0)
 
         # initialize weights
-        self.init_weight_n_biases()
-
-        
+        self.init_weight_n_biases()      
 
     def forward(self,feat_map, gt_boxes=None, obj_label=None):
         '''
@@ -242,24 +237,22 @@ class RegionProposalNetwork(nn.Module):
             feature map extracted  from the input image
         '''
         self.batch_size, _,height,width = feat_map.shape
-        feat_map = F.relu(self.conv1(feat_map), inplace=True)   # [N,out_channels,H,W]
-        anchors =  self.anchors.view(1, self.anchors.size(0), 4).expand(self.batch_size, self.anchors.size(0), 4)
+        conv1 = F.relu(self.conv1(feat_map), inplace=False)   # [N,out_channels,H,W]
+        anchors =  self.anchors.view(1, self.anchors.size(0), 4).expand(self.batch_size, self.anchors.size(0), 4).type_as(conv1)
 
-        box_reg = self.reg(feat_map)       # anchor location predictions    [N,A*4,H,W], deltas
+        box_reg = self.reg(conv1)       # anchor location predictions    [N,A*4,H,W], deltas
         box_reg = box_reg.permute(0,2,3,1).contiguous().view(self.batch_size, -1, 4)   # reshape to same shape as anchor [N,W*H*A,4]       
     
         # print('box reg shape',box_reg.shape)
-        obj_score = self.cls(feat_map)     # objectness score      [N,A*2,H,W]
+        obj_score = self.cls(conv1)     # objectness score      [N,A*2,H,W]
+        obj_score = obj_score.permute(0,2,3,1).contiguous()
         obj_fg_score = F.softmax(obj_score.view(self.batch_size, height,width,self.n_anchors,2),dim=-1)
         obj_fg_score = obj_fg_score[...,1].contiguous().view(self.batch_size,-1)
 
-        obj_score = obj_score.permute(0,2,3,1).contiguous().view(self.batch_size, -1,2) #[N,H,W,A*2] -> [N, W*H*A, 2]
-
-        targets = None
-        gt_proposals = None
+        obj_score = obj_score.view(self.batch_size, -1,2) #[N,H,W,A*2] -> [N, W*H*A, 2]
         loss = {'reg_loss': 0, 'cls_loss': 0}
         
-        proposals = self.proposal_generator(anchors,box_reg, obj_fg_score)
+        proposals = self.proposal_generator(anchors,box_reg.detach(), obj_fg_score) # {'boxes': rpn_roi, 'scores': rpn_scores, 'indices': roi_indices}
 
         if self.training:
             targets = self.target_generator(anchors, gt_boxes, obj_label)
@@ -267,16 +260,18 @@ class RegionProposalNetwork(nn.Module):
             gt_proposals = self.proposal_generator.assignLabels(proposals['boxes'], proposals['scores'], gt_boxes, obj_label)
 
             proposals['locs'] = utils.boxToLocation(gt_proposals['boxes'], proposals['boxes'])
+            proposals['gt_boxes'] = gt_proposals['boxes']
             proposals['cls_labels'] = gt_proposals['labels']
 
             target_anchors = targets['anchors']
-            target_labels = targets['labels']
-
-            cls_loss, reg_loss = losses.rpn_loss_fn(box_reg, obj_score, target_anchors, target_labels)
+            target_labels = targets['labels'].type_as(obj_label)
+            
+            cls_loss, reg_loss = losses.rpn_loss_fn(box_reg, obj_score.detach(), target_anchors, target_labels)
 
             loss['reg_loss'] = reg_loss
             loss['cls_loss'] = cls_loss
-        
+
+
         return proposals, loss
 
     def init_weight_n_biases(self):

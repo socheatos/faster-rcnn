@@ -14,6 +14,8 @@ class BaseArchitect():
         except:
             vgg = torchvision.models.vgg16(pretrained=True)
         features = list(vgg.features[:30])
+        for f in features[:24]:
+            f.trainable = False # Freeze the convolution blocks for finetuning 
         classifier = list(vgg.classifier[:-1])
 
         self.CONFIG = config
