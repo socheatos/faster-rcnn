@@ -22,30 +22,30 @@ class FasterRCNN(nn.Module):
 
     def forward(self,im,gt_bboxes=None, obj_label=None):            # [N,3,H,W]
         feature_map = self.extractor(im)       # [N,512,H//16, W//16]
-        proposals, rpn_loss = self.rpn(feature_map, gt_bboxes, obj_label)
+        rpn_proposals, rpn_loss = self.rpn(feature_map, gt_bboxes, obj_label)
 
-        rpn_boxes, rpn_scores, rpn_indices  = proposals['boxes'], proposals['scores'],proposals['indices']
-
+        rpn_boxes, rpn_indices  = rpn_proposals['boxes'],rpn_proposals['indices']
+        print('rpn boxes', rpn_boxes.shape)
         # pooling
         sampled_boxes = rpn_boxes.view(-1,4)
         idx = rpn_indices.view(-1,1)
 
         pool_input = torch.cat([idx, sampled_boxes],dim=-1)
         pool_input[:,1:] = pool_input[:,1:].mul_(1/self.feat_stride)
-
+        
         pool_output = self.pooling(feature_map, pool_input)
         pool_output = pool_output.view(pool_output.size(0),-1)
-
         # classifier
         loc, score = self.clsifier(pool_output)
         loc = loc.view(-1, self.num_classes, 4)
 
+        rcnn_proposals = {'locs':loc, 'scores':score}
         rcnn_loss = {'reg_loss': 0, 'cls_loss':0}
+        
         if self.training:
-        # losses
-            cls_loss, reg_loss = losses.fastrcnn_loss_fn(loc, score, proposals['locs'].clone(), proposals['cls_labels'].clone())
+            cls_loss, reg_loss = losses.fastrcnn_loss_fn(loc, score, rpn_proposals['locs'], rpn_proposals['cls_labels'])
             rcnn_loss['reg_loss'] = reg_loss
             rcnn_loss['cls_loss'] = cls_loss 
 
-        output = [rpn_boxes, rpn_scores, rpn_loss, loc, score, rcnn_loss, proposals]
+        output = [rpn_proposals, rcnn_proposals, rpn_loss, rcnn_loss]
         return output

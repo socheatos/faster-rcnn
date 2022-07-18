@@ -39,3 +39,6 @@ with torch.no_grad():
         # images, labels,bboxs = images.to(device), labels.to(device), bboxs.to(device)
         outputs = frcnn(images,bboxs, labels)
         
+# [ ] finish up trainer
+# [ ] finish up evaluation/accuracy metric
+# [ ] rid of padding sequence

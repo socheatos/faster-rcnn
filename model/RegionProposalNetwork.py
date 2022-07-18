@@ -1,7 +1,7 @@
 from torch.nn import functional as F
 import torch
-from torch import gt, nn
-from . import utils, losses
+from torch import nn
+from . import losses, utils
 from config import Config
 from torch.nn.utils.rnn import pad_sequence
 from math import sqrt
@@ -15,6 +15,7 @@ from math import sqrt
 # [x]: find all anchors with same iou as the highest iou
 # [x]: add padding to support varying size of generated proposal 
 # [x]: create separate modules for anchor and target generation
+# [ ]: adjust for target data has dim 2 size [Nx5] formatted as (img_id, y1,x1,y2,x2) instead of [B x N x 4] 
 class AnchorGenerator():
     def __init__(self,config):
         self.ratios = config.ratios
@@ -91,7 +92,8 @@ class ProposalGenerator(nn.Module):
             rpn_scores.append(sco)
         
         # [ ] DONT pad, add the indices to indicate image instead 
-        rpn_roi = pad_sequence(rpn_roi, batch_first=True)
+        # [B, N, 4] where N is number of observations (padded for equal length)
+        rpn_roi = pad_sequence(rpn_roi, batch_first=True) #[B,N,4]
         rpn_scores = pad_sequence(rpn_scores, batch_first=True)
         roi_indices = torch.ones_like(rpn_scores)
         for i in range(batch_size):
@@ -104,10 +106,10 @@ class ProposalGenerator(nn.Module):
     def assignLabels(self, boxes, scores, gt_boxes, obj_labels):
         # called only if training
         batch_size = boxes.size(0)
-        labels = torch.empty_like(scores)
+        labels = torch.empty_like(scores)       #[B,N]
         labels.fill_(-1)
 
-        ious = utils.iou_batch(gt_boxes, boxes)
+        ious = utils.iou_batch(gt_boxes, boxes) #[B,N,G]
         labels, gt_idx = utils.assignLabels(labels, ious,self.pos_iou_threshold)
 
         for b in range(batch_size):
@@ -144,7 +146,7 @@ class TargetGenerator(nn.Module):
         self.height = config.input_h
         self.width = config.input_w
     
-    def forward(self, anchors, gt_boxes, obj_labels):
+    def forward(self, anchors, gt_boxes, gt_labels):
         batch_size = anchors.size(0)
         index_inside = torch.where(
                                     (anchors[..., 0] >= 0) &
@@ -153,26 +155,26 @@ class TargetGenerator(nn.Module):
                                     (anchors[..., 3] <= self.width))
         
         valid_anchors = anchors[index_inside]
-        valid_anchors = valid_anchors.view(batch_size,-1,4)
+        valid_anchors = valid_anchors.view(batch_size,-1,4) #[B,N,4]
         
-        label = torch.empty((batch_size, anchors.size(1)))
+        label = torch.empty((batch_size, anchors.size(1))) #[B,N]
         label.fill_(-1)
         # labels wrt to gt
-        valid_ious = utils.iou_batch(gt_boxes, valid_anchors)
+        valid_ious = utils.iou_batch(gt_boxes, valid_anchors)  #[B,N, GT.size(1)]
         
         ious = torch.zeros(batch_size, anchors.size(1), valid_ious.size(-1)).type_as(valid_ious)
         ious[index_inside] = valid_ious.reshape(-1, valid_ious.size(-1))
         self.target_ious = ious
         
-        label, gt_idx = utils.assignLabels(label,ious, self.pos_ious_threshold)
+        label, gt_idx = utils.assignLabels(label,ious, self.pos_ious_threshold)   #[B,N]
 
         for b in range(batch_size):
             label[b] = utils.sampling(label[b],self.n_sample)
 
         gt_boxes = utils.generateBBox(gt_boxes, gt_idx)
-        cls_label = utils.generateClsLab(label, obj_labels, gt_idx)
+        cls_label = utils.generateClsLab(label, gt_labels, gt_idx)
 
-        anchors = utils.boxToLocation(gt_boxes, anchors)
+        anchors = utils.boxToLoc(gt_boxes, anchors)
         
         output = {'boxes': gt_boxes, 'anchors': anchors, 'labels':label, 'cls_labels': cls_label}
 
@@ -238,7 +240,7 @@ class RegionProposalNetwork(nn.Module):
         '''
         self.batch_size, _,height,width = feat_map.shape
         conv1 = F.relu(self.conv1(feat_map), inplace=False)   # [N,out_channels,H,W]
-        anchors =  self.anchors.view(1, self.anchors.size(0), 4).expand(self.batch_size, self.anchors.size(0), 4).type_as(conv1)
+        anchors =  self.anchors.view(1, self.anchors.size(0), 4).expand(self.batch_size, self.anchors.size(0), 4).type_as(conv1) # expanding the anchors to same batch size as the featmap
 
         box_reg = self.reg(conv1)       # anchor location predictions    [N,A*4,H,W], deltas
         box_reg = box_reg.permute(0,2,3,1).contiguous().view(self.batch_size, -1, 4)   # reshape to same shape as anchor [N,W*H*A,4]       
@@ -252,21 +254,23 @@ class RegionProposalNetwork(nn.Module):
         obj_score = obj_score.view(self.batch_size, -1,2) #[N,H,W,A*2] -> [N, W*H*A, 2]
         loss = {'reg_loss': 0, 'cls_loss': 0}
         
-        proposals = self.proposal_generator(anchors,box_reg.detach(), obj_fg_score) # {'boxes': rpn_roi, 'scores': rpn_scores, 'indices': roi_indices}
+        # [B, N', 4] ; [B, N']
+        proposals = self.proposal_generator(anchors,box_reg.detach(), obj_fg_score.detach()) # {'boxes': rpn_roi, 'scores': rpn_scores, 'indices': roi_indices}
 
         if self.training:
             targets = self.target_generator(anchors, gt_boxes, obj_label)
 
             gt_proposals = self.proposal_generator.assignLabels(proposals['boxes'], proposals['scores'], gt_boxes, obj_label)
-
-            proposals['locs'] = utils.boxToLocation(gt_proposals['boxes'], proposals['boxes'])
+            print('making locs', gt_proposals['boxes'].shape, proposals['boxes'].shape)
+            proposals['locs'] = utils.boxToLoc(gt_proposals['boxes'], proposals['boxes'])
             proposals['gt_boxes'] = gt_proposals['boxes']
             proposals['cls_labels'] = gt_proposals['labels']
 
             target_anchors = targets['anchors']
             target_labels = targets['labels'].type_as(obj_label)
+            print(box_reg.shape, obj_score.shape, target_anchors.shape, target_labels.shape)
             
-            cls_loss, reg_loss = losses.rpn_loss_fn(box_reg, obj_score.detach(), target_anchors, target_labels)
+            cls_loss, reg_loss = losses.rpn_loss_fn(box_reg.detach(), obj_score.detach(), target_anchors, target_labels)
 
             loss['reg_loss'] = reg_loss
             loss['cls_loss'] = cls_loss

@@ -57,8 +57,11 @@ class Config():
         self.anchor_pos_iou_thres = 0.5
         self.anchor_n_sample = 256
         
-        self.proposal_pos_iou_thres = 0.7
+        self.proposal_pos_iou_thres = 0.5
         self.proposal_n_sample = 128
+
+        # classification
+        self.obj_confidence_threshold = 0.5
 
 
 
