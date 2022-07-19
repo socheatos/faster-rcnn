@@ -92,7 +92,7 @@ class ProposalGenerator():
 
         return output
 
-    def assignLabels(self, boxes, scores, gt_boxes, obj_labels):
+    def assignLabels(self, boxes, scores, gt_boxes, obj_labels, num_classes=None):
         # called only if training
         
         label_idx = torch.unique(gt_boxes[:,0], return_counts=True)
