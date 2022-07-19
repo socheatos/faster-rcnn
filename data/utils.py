@@ -1,21 +1,40 @@
-import enum
+from torchvision import transforms
 import torch
 import numpy as np
-from torch.nn.utils.rnn import pad_sequence
 import matplotlib.pyplot as plt
 import cv2 
+
+# def collate_fn(batch):
+#     images = list()
+#     labels = list()
+#     bboxs = list()
+#     for b in batch:
+#         images.append(b[0])
+#         labels.append(b[1])
+#         bboxs.append(b[2])
+#     images = torch.stack(images, dim=0)
+#     labels = pad_sequence(labels, batch_first=True)
+#     bboxs = pad_sequence(bboxs, batch_first=True)
+
+#     return images, labels, bboxs
 
 def collate_fn(batch):
     images = list()
     labels = list()
     bboxs = list()
-    for b in batch:
-        images.append(b[0])
-        labels.append(b[1])
-        bboxs.append(b[2])
-    images = torch.stack(images, dim=0)
-    labels = pad_sequence(labels, batch_first=True)
-    bboxs = pad_sequence(bboxs, batch_first=True)
+
+    for i,(image, label, bbox) in enumerate(batch):
+        idx = torch.ones(len(label)) * i
+        label = torch.stack((idx,label),dim=-1)
+        bbox = torch.stack((idx,bbox[...,0],bbox[...,1],bbox[...,2],bbox[...,3]), dim=-1)
+
+        images.append(image)
+        labels.append(label)
+        bboxs.append(bbox)
+
+    images = torch.stack(images)
+    labels = torch.concat(labels)
+    bboxs = torch.concat(bboxs)
 
     return images, labels, bboxs
 
@@ -38,3 +57,9 @@ def visualize_images(bbox_proposed, images, bboxs):
         plt.axis('off')
     
     plt.show()
+
+def transform(height, weight):
+    transform = transforms.Compose([transforms.ToPILImage(),
+                                    transforms.Resize((height,weight)),
+                                    transforms.ToTensor()])
+    return transform

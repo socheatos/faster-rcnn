@@ -24,12 +24,13 @@ def nms(bbox: torch.Tensor, scores:torch.Tensor, threshold:float):
     :param: `keep` : ~torch.Tensor
 
     '''
+
     order = scores.ravel().argsort(descending=True)
     keep = []
-
+    
     while len(order)>0:
         current_highest_score = order[0]
-        keep.append(current_highest_score)
+        keep.append(current_highest_score.item())
         order = order[1:]
 
         if len(order)==0:
@@ -40,12 +41,20 @@ def nms(bbox: torch.Tensor, scores:torch.Tensor, threshold:float):
         order = order[mask]
     return keep
 
-def boxToLocation(ground_truth, anchors):
+def boxToLoc(ground_truth, anchors):
     # given bbox, computes offsets and scales to match bbox_1 to bbox_2
     # finding x_a, y_a, h_a, w_a
+    eps = torch.tensor(1e-6)
 
-    h_a = anchors[...,2] - anchors[...,0]
-    w_a = anchors[...,3] - anchors[...,1]
+    if ground_truth.size(-1) == 5:
+        ground_truth = ground_truth[...,1:]
+    if anchors.size(-1)==5:
+        anchors = anchors[...,1:]
+    if ground_truth.dim() != anchors.dim():
+        anchors = anchors.unsqueeze(0).repeat(ground_truth.size(0),1,1)
+
+    h_a = torch.max(anchors[...,2] - anchors[...,0],eps)
+    w_a = torch.max(anchors[...,3] - anchors[...,1], eps)
     x_a = anchors[...,0] + h_a*0.5
     y_a = anchors[...,1] + w_a*0.5
 
@@ -55,38 +64,49 @@ def boxToLocation(ground_truth, anchors):
     x = ground_truth[...,0] + h*0.5
     y = ground_truth[...,1] + w*0.5
 
-    # finding parameterized coordinates of gt associated with the anchors
-    # prevents exp overflow
-    eps = 1e-10
-    h_a += eps
-    w_a += eps
+    if ground_truth.size(0) != anchors.size(0):
+        t_y = (y.unsqueeze(-1)-y_a)/h_a
+        t_x = (x.unsqueeze(-1)-x_a)/w_a
+        t_w = torch.log(w.unsqueeze(-1)/w_a)
+        t_h = torch.log(h.unsqueeze(-1)/h_a)
+    else:
+        t_y = (y-y_a)/h_a
+        t_x = (x-x_a)/w_a
+        t_w = torch.log(w/w_a)
+        t_h = torch.log(h/h_a)
 
-    t_y = (y-y_a)/h_a
-    t_x = (x-x_a)/w_a 
-    t_w = torch.log(w/w_a)
-    t_h = torch.log(h/h_a)
-    
     t = torch.stack((t_y,t_x,t_h, t_w), dim=-1)
-
     return t
 
-def locToBox(anchors: torch.Tensor, locs:torch.Tensor):
-    # convert anchors to x,y,h,w format
+
+def locToBox(anchors: torch.Tensor, locs: torch.Tensor):
+    '''converts anchors of (y1,x1,y2,x2) format to (x,y,h,w) format
+
+    Parameters
+    ----------
+    anchors : torch.Tensor ([N,4])
+    locs : torch.Tensor ([B,N,4])
+
+    Returns
+    ----------
+    torch.Tensor (B,N,4)
+    '''
+    eps = torch.tensor(1e-6)
+
     h_a = anchors[..., 2] - anchors[..., 0]
     w_a = anchors[..., 3] - anchors[..., 1]
     y_a = anchors[..., 0] + 0.5 * h_a
     x_a = anchors[..., 1] + 0.5 * w_a
 
-    # convert locs to x,y,h,w format 
     t_y = locs[...,0::4]     
     t_x = locs[...,1::4]
-    t_h = locs[...,2::4]
-    t_w = locs[...,3::4]
+    t_h = torch.max(torch.exp(locs[...,2::4]), eps)
+    t_w = torch.max(torch.exp(locs[...,3::4]), eps)
 
-    y = t_y * h_a.unsqueeze(2) + y_a.unsqueeze(2)
-    x = t_x * w_a.unsqueeze(2) + x_a.unsqueeze(2)
-    h = torch.exp(t_h) * h_a.unsqueeze(2)
-    w = torch.exp(t_w) * w_a.unsqueeze(2)
+    y = t_y * h_a.unsqueeze(-1) + y_a.unsqueeze(-1)
+    x = t_x * w_a.unsqueeze(-1) + x_a.unsqueeze(-1)
+    h = t_h * h_a.unsqueeze(-1)
+    w = t_w * w_a.unsqueeze(-1)
 
     rpn_boxes = torch.empty_like(locs)
     rpn_boxes[...,0::4] = y - (0.5 * h)
@@ -152,7 +172,45 @@ def split(batch, keep):
     batch = torch.split(batch, split_size_or_sections=splits)
     return batch
 
-def iou(groundtruth, anchor):
+def iou(groundtruth: torch.Tensor, anchor: torch.Tensor):
+    if anchor.dim()==3:
+        ious = list()
+        split = torch.unique(groundtruth[:,0], return_counts=True)
+        gt = torch.split(groundtruth, tuple(split[1]))
+        ious = []
+        for i, g in enumerate(gt):
+            iou_g = calculate_iou(g, anchor[i,...])
+            ious.append(iou_g)
+        ious = torch.concat(ious)
+    if anchor.dim()==2:
+        ious = calculate_iou(groundtruth, anchor)
+    return ious
+
+def calculate_iou(groundtruth: torch.Tensor, anchor: torch.Tensor):
+    '''Calculates the intersection-over-union between groundtruth anchors and the generated anchors
+
+    Parameters
+    ----------
+    groundtruth : torch.Tensor [N,5] or [,5]
+        _description_
+    anchor : torch.Tensor [A,4]
+        _description_
+
+    Returns
+    -------
+    torch.Tensor [N,A]
+        _description_
+    '''
+    if groundtruth.size(-1)==5:
+        if groundtruth.dim()==1:
+            groundtruth = groundtruth[1:]
+        elif groundtruth.dim()==2:
+            groundtruth = groundtruth[:,1:].unsqueeze(1)
+    
+    if anchor.size(-1) == 5:
+        anchor = anchor[:,1:]
+    
+
     y1,x1,y2,x2 = anchor[...,0],anchor[...,1],anchor[...,2],anchor[...,3]
     gy1,gx1,gy2,gx2 = groundtruth[...,0],groundtruth[...,1],groundtruth[...,2],groundtruth[...,3]
 
@@ -198,7 +256,7 @@ def iou_batch(groundtruth,anchors):
     iou = (intersect/union).permute(0,2,1)
     return iou
 
-def sampling(labels: torch.Tensor, n_sample: int, pos_ratio: float=0.5):
+def sampling(labels: torch.Tensor, n_sample: int=128, pos_ratio: float=0.5):
     '''
     Randomly samples from labels with given number of sample and ratio of postive/negative.
     First sampling positive labels, if it does not meet the threshold, the sample will be padded with negative labels.
@@ -213,32 +271,35 @@ def sampling(labels: torch.Tensor, n_sample: int, pos_ratio: float=0.5):
         `~torch.Tensor`
     '''
 
-    n_pos = int(n_sample*pos_ratio)
-    pos_idx = (torch.where(labels==1)[0]).float()
+    n_pos = int(n_sample * pos_ratio)
 
-    if len(pos_idx) > n_pos:
-        discard = pos_idx[pos_idx.multinomial(len(pos_idx)-n_pos, replacement=False)].long()
-        labels[discard] = -1
+    for i,label in enumerate(labels):
+        pos_idx = torch.where(label==1)[0].float()
+        if len(pos_idx) > n_pos:
+            discard = torch.randperm(len(pos_idx))[:n_pos]
+            discard = pos_idx[discard].long()
+            labels[i,discard] = -1
+        
+        pos_idx = torch.where(labels[i,:]==1)[0].float()
+        n_neg = n_sample-len(pos_idx)
+        neg_idx = torch.where(label==0)[0].float()
+        if len(neg_idx) > n_neg:
+            discard = torch.randperm(len(neg_idx))[:n_neg]
+            discard = neg_idx[discard].long()  
+            labels[i,discard] = -1
 
-    pos_idx = torch.where(labels==1)[0]
-    n_neg = n_sample - len(pos_idx)
-    neg_idx = (torch.where(labels==0)[0]).float()
 
-    if len(neg_idx) > n_neg:
-        discard = neg_idx[neg_idx.multinomial(len(neg_idx)-n_neg, replacement=False)].long()
-        labels[discard] = -1
-    
     return labels
   
 
-def assignLabels(label, ious, pos_iou_thres=0.5):
+def assignLabels(ious, label, pos_iou_thres=0.5):
     '''
     Parameters
     ----------
     label : torch.Tensor
-        [batch_size, num_obs] of -1 filled tensors
+        [num_images, num_anchors] of -1 filled tensors
     ious : torch.Tensor
-        [batch_size, num_obs, num_labels] 
+        [num_labels, num_anchors] 
     pos_ious_thres : float, optional
         label=1 if above the threshold and 0 if below 1-threshod, by default 0.5
     
@@ -246,39 +307,63 @@ def assignLabels(label, ious, pos_iou_thres=0.5):
     -------
     [batch_size, num_obs] label:torch.Tensor
     '''
-    label_max_ious, _ = torch.max(ious, dim=1)
-    label_max_ious[torch.where(label_max_ious==0)] = -1
-    all_label_max_idx = torch.where(ious==label_max_ious.unsqueeze(1))
     
-    _, gt_idx =  torch.max(ious, dim=-1)
-    gt_ious = torch.gather(ious,-1,gt_idx.unsqueeze(-1)).squeeze(-1)
-    gt_max_ious, _ = torch.max(gt_ious, dim=1)
-    gt_max_idx = torch.where(gt_ious==gt_max_ious.unsqueeze(-1))
+    label[ious>=pos_iou_thres] = 1
+    label[ious<1-pos_iou_thres] = 0
 
-    label[gt_ious<(1-pos_iou_thres)] = 0
-    label[(all_label_max_idx[0],all_label_max_idx[1])] = 1
-    label[gt_max_idx] = 1
-    label[gt_ious>=pos_iou_thres] = 1
+    label_max_ious,_ = torch.max(ious, dim=1)
+    all_label_max_idx = torch.where(ious==label_max_ious.unsqueeze(1))
+    label[all_label_max_idx] = 1
 
-    return label, gt_idx
+    _,gt_idx = torch.max(ious, dim=0)   # gt_idx corresponds to which box the anchor has highest correspondence with
 
-def generateBBox(gt_boxes, idx):
-    gt_idx_anchors = idx.repeat(4,1,1).permute(1,2,0).unsqueeze(-2)
-    gt_boxes = gt_boxes.unsqueeze(1).repeat(1,idx.size(1),1,1)
-    gt_boxes = torch.gather(gt_boxes, -2, gt_idx_anchors).squeeze()
-    return gt_boxes
+    return label, gt_idx 
 
-def generateClsLab(fg_label, obj_label,idx):
+def generateClsLab(fg_label, gt_label, gt_idx):
+    gt_label = gt_label[:,1].clone()
 
     cls_label = torch.empty_like(fg_label)
     cls_label.fill_(0)
 
-    gt_idx_objlab = idx.unsqueeze(1)
-    obj_label = obj_label.repeat(1,1,idx.size(1)).squeeze()
-    selected = torch.gather(obj_label,1,gt_idx_objlab).squeeze().type_as(cls_label) #(BATCH x NUMANCHORS)
-
+    selected = gt_label[gt_idx] # object label for each anchor
+    selected = selected.unsqueeze(0).repeat(fg_label.size(0),1).type_as(cls_label)
     mask = fg_label.eq(1)
 
-    cls_label[mask] = selected[mask]
-
+    cls_label[mask] = selected[mask] # to have the same dimension as output of score: [rpn_boxes, num_classes]
     return cls_label
+    
+def maxInputs(inputs, ious, splits):
+    '''Reduces dimension of inputs, used when there are more than one groundtruth label in the image.
+    
+    Parameters
+    ----------
+    inputs : torch.tensor 
+        _description_
+    ious : torch.tensor
+        _description_
+    splits : tuple
+        _description_
+
+    Returns
+    -------
+    torch.tensor
+        each batch consists of all labels possible given the iou
+    '''
+    inputs = torch.split(inputs, tuple(splits[1]))
+    ious = torch.split(ious, tuple(splits[1]))
+    outputs = list()    
+    for input, iou in zip(inputs, ious):
+        id = iou.max(0)[1]
+        if input.dim()==3:
+            range = torch.arange(iou.size(1))
+            input = input[id, range]
+        if input.dim()==2:
+            if input.size(-1) != iou.size(-1):
+                input = input[id]
+            else:
+                range = torch.arange(iou.size(1))
+                input = input[id, range] 
+            
+        outputs.append(input)
+    outputs = torch.stack(outputs)
+    return outputs
